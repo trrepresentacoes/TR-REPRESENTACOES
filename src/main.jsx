@@ -24,7 +24,11 @@ function App(){
   const t=await supabase.from('sales_team_members').select('*').eq('active',true).order('name');setTeam(t.data||[]);
   const c=await supabase.from('sales_clients').select('*').order('created_at',{ascending:false});setClients(c.data||[]);
   const a=await supabase.from('sales_daily_activity').select('*').order('activity_date');setActivities(a.data||[]);
-   if(p.data?.role==='admin'){const s=await supabase.from('sales_signup_requests').select('*').eq('status','pending').order('created_at',{ascending:false});setPendingSignups(s.data||[]);}
+   if(p.data?.role==='admin'){
+    const {data:pendingData,error:pendingError}=await supabase.functions.invoke('manage-seller',{body:{action:'list_pending'}});
+    if(!pendingError && pendingData?.ok) setPendingSignups(pendingData.requests||[]);
+    else setPendingSignups([]);
+   }else setPendingSignups([]);
   setLoading(false);
  }
  useEffect(()=>{load();const {data}=supabase.auth.onAuthStateChange(()=>load());return()=>data.subscription.unsubscribe()},[]);
@@ -32,8 +36,19 @@ function App(){
 
  async function login(e){e.preventDefault();setAuthMsg('');const {error}=await supabase.auth.signInWithPassword({email,password});if(error)setAuthMsg(error.message)}
  async function signout(){await supabase.auth.signOut()}
-  async function submitSignup(e){e.preventDefault();setSignupMsg('');const {error}=await supabase.from('sales_signup_requests').insert({name:signup.name.trim(),email:signup.email.trim().toLowerCase(),phone:signup.phone.trim(),whatsapp_number:signup.whatsapp_number.trim(),status:'pending'});if(error){setSignupMsg(error.message);return}setSignupMsg('Cadastro enviado! Aguarde a aprovação do administrador.');setSignup({name:'',email:'',phone:'',whatsapp_number:'',password:''})}
-  async function reviewSignup(id,status){const {error}=await supabase.from('sales_signup_requests').update({status,reviewed_by:session?.user?.id,reviewed_at:new Date().toISOString()}).eq('id',id);if(error){alert(error.message);return}load()}
+  async function submitSignup(e){
+   e.preventDefault();setSignupMsg('');
+   const {data,error}=await supabase.functions.invoke('manage-seller',{body:{action:'signup',...signup,name:signup.name.trim(),email:signup.email.trim().toLowerCase(),phone:signup.phone.trim(),whatsapp_number:signup.whatsapp_number.trim()}});
+   if(error||!data?.ok){setSignupMsg(data?.error||error?.message||'Não foi possível enviar o cadastro.');return}
+   setSignupMsg('Cadastro enviado! Aguarde a aprovação do administrador.');
+   setSignup({name:'',email:'',phone:'',whatsapp_number:'',password:''});
+  }
+  async function reviewSignup(id,status){
+   const action=status==='approved'?'approve':'reject';
+   const {data,error}=await supabase.functions.invoke('manage-seller',{body:{action,request_id:id}});
+   if(error||!data?.ok){alert(data?.error||error?.message||'Não foi possível atualizar o cadastro.');return}
+   load();
+  }
  async function saveClient(e){
   e.preventDefault();setSaving(true);
   const payload={...form,desired_value:form.desired_value?Number(form.desired_value):null,next_contact_at:form.next_contact_at||null};
@@ -66,7 +81,7 @@ function App(){
  const ranking=useMemo(()=>team.map(t=>({...t,count:clients.filter(c=>c.seller_id===t.id).length,sales:clients.filter(c=>c.seller_id===t.id&&c.status==='Fechado').length,value:clients.filter(c=>c.seller_id===t.id).reduce((a,c)=>a+Number(c.sold_value||0),0)})).sort((a,b)=>b.value-a.value),[team,clients]);
 
  if(loading)return <div className="center">Carregando TR Representações...</div>;
- if(!session)return <div className="login"><div className="login-card"><div className="logo">TR</div><h1>TR Representações</h1>{!signupMode?<><p>Gestão comercial da sua equipe</p><form onSubmit={login}><input placeholder="E-mail" type="email" value={email} onChange={e=>setEmail(e.target.value)} required/><input placeholder="Senha" type="password" value={password} onChange={e=>setPassword(e.target.value)} required/><button>Entrar</button>{authMsg&&<small>{authMsg}</small>}</form><button className="secondary" onClick={()=>{setSignupMode(true);setAuthMsg('')}}>Criar cadastro de vendedor</button></>:<><p>Solicite seu acesso ao CRM</p><form onSubmit={submitSignup}><input placeholder="Nome completo" value={signup.name} onChange={e=>setSignup({...signup,name:e.target.value})} required/><input placeholder="E-mail" type="email" value={signup.email} onChange={e=>setSignup({...signup,email:e.target.value})} required/><input placeholder="Telefone" value={signup.phone} onChange={e=>setSignup({...signup,phone:e.target.value})}/><input placeholder="WhatsApp" value={signup.whatsapp_number} onChange={e=>setSignup({...signup,whatsapp_number:e.target.value})}/><input placeholder="Senha desejada" type="password" value={signup.password} onChange={e=>setSignup({...signup,password:e.target.value})} required/><small>A senha será definida no momento da liberação do acesso.</small><button>Enviar cadastro</button>{signupMsg&&<small>{signupMsg}</small>}</form><button className="secondary" onClick={()=>setSignupMode(false)}>Voltar para entrar</button></>}</div></div>;
+ if(!session)return <div className="login"><div className="login-card"><div className="logo">TR</div><h1>TR Representações</h1>{!signupMode?<><p>Gestão comercial da sua equipe</p><form onSubmit={login}><input placeholder="E-mail" type="email" value={email} onChange={e=>setEmail(e.target.value)} required/><input placeholder="Senha" type="password" value={password} onChange={e=>setPassword(e.target.value)} required/><button>Entrar</button>{authMsg&&<small>{authMsg}</small>}</form><button className="secondary" onClick={()=>{setSignupMode(true);setAuthMsg('')}}>Criar cadastro de vendedor</button></>:<><p>Solicite seu acesso ao CRM</p><form onSubmit={submitSignup}><input placeholder="Nome completo" value={signup.name} onChange={e=>setSignup({...signup,name:e.target.value})} required/><input placeholder="E-mail" type="email" value={signup.email} onChange={e=>setSignup({...signup,email:e.target.value})} required/><input placeholder="Telefone" value={signup.phone} onChange={e=>setSignup({...signup,phone:e.target.value})}/><input placeholder="WhatsApp" value={signup.whatsapp_number} onChange={e=>setSignup({...signup,whatsapp_number:e.target.value})}/><input placeholder="Senha desejada" type="password" value={signup.password} onChange={e=>setSignup({...signup,password:e.target.value})} required/><small>A senha será usada para o acesso do vendedor após a aprovação.</small><button>Enviar cadastro</button>{signupMsg&&<small>{signupMsg}</small>}</form><button className="secondary" onClick={()=>setSignupMode(false)}>Voltar para entrar</button></>}</div></div>;
  if(!profile)return <div className="center"><div><h2>Acesso ainda não configurado</h2><button onClick={signout}>Sair</button></div></div>;
 
  return <div className="app"><aside><div className="brand"><b>TR</b><span>Representações</span></div>
