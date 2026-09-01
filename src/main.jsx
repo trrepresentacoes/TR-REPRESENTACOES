@@ -13,27 +13,112 @@ function App(){
  const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[authMsg,setAuthMsg]=useState(''),[saving,setSaving]=useState(false);
  const [reportMonth,setReportMonth]=useState(new Date().toISOString().slice(0,7)),[reportSeller,setReportSeller]=useState('');
  const [editingSeller,setEditingSeller]=useState(null),[sellerName,setSellerName]=useState(''),[sellerGoal,setSellerGoal]=useState(''),[sellerWhatsapp,setSellerWhatsapp]=useState('');
-  const [signupMode,setSignupMode]=useState(false),[signup,setSignup]=useState({name:'',email:'',phone:'',whatsapp_number:'',password:''}),[signupMsg,setSignupMsg]=useState('');
-  const [pendingSignups,setPendingSignups]=useState([]);
+ const [signupMode,setSignupMode]=useState(false),[signup,setSignup]=useState({name:'',email:'',phone:'',whatsapp_number:'',password:''}),[signupMsg,setSignupMsg]=useState('');
+ const [pendingSignups,setPendingSignups]=useState([]),[processingSignup,setProcessingSignup]=useState(null);
  const [form,setForm]=useState({client_name:'',phone:'',seller_id:'',interest:'',desired_value:'',status:'Novo',next_contact_at:'',notes:''});
 
  async function load(){
-  const {data:{session}}=await supabase.auth.getSession();setSession(session);
-  if(!session){setLoading(false);return}
-  const p=await supabase.from('sales_user_profiles').select('*').eq('user_id',session.user.id).maybeSingle();setProfile(p.data);
+  const {data:{session}}=await supabase.auth.getSession();
+  setSession(session);
+  if(!session){setProfile(null);setLoading(false);return}
+
+  const p=await supabase.from('sales_user_profiles').select('*').eq('user_id',session.user.id).maybeSingle();
+  let currentProfile=p.data||null;
+
+  // Se o vendedor foi aprovado, cria o perfil automaticamente no primeiro login.
+  if(!currentProfile){
+   const r=await supabase.from('sales_signup_requests').select('*').eq('email',String(session.user.email||'').toLowerCase()).eq('status','approved').order('created_at',{ascending:false}).limit(1).maybeSingle();
+   if(r.data){
+    const t0=await supabase.from('sales_team_members').select('*').eq('active',true).eq('name',r.data.name).limit(1).maybeSingle();
+    if(t0.data){
+     const ins=await supabase.from('sales_user_profiles').insert({user_id:session.user.id,team_member_id:t0.data.id,role:'seller'}).select('*').maybeSingle();
+     if(!ins.error) currentProfile=ins.data;
+    }
+   }
+  }
+  setProfile(currentProfile);
+
   const t=await supabase.from('sales_team_members').select('*').eq('active',true).order('name');setTeam(t.data||[]);
   const c=await supabase.from('sales_clients').select('*').order('created_at',{ascending:false});setClients(c.data||[]);
   const a=await supabase.from('sales_daily_activity').select('*').order('activity_date');setActivities(a.data||[]);
-   if(p.data?.role==='admin'){const s=await supabase.from('sales_signup_requests').select('*').eq('status','pending').order('created_at',{ascending:false});setPendingSignups(s.data||[]);}
+  if(currentProfile?.role==='admin'){
+   const s=await supabase.from('sales_signup_requests').select('*').eq('status','pending').order('created_at',{ascending:false});
+   setPendingSignups(s.data||[]);
+  }else setPendingSignups([]);
   setLoading(false);
  }
  useEffect(()=>{load();const {data}=supabase.auth.onAuthStateChange(()=>load());return()=>data.subscription.unsubscribe()},[]);
- useEffect(()=>{if(!session)return;const ch=supabase.channel('sales-live').on('postgres_changes',{event:'*',schema:'public',table:'sales_clients'},()=>load()).on('postgres_changes',{event:'*',schema:'public',table:'sales_daily_activity'},()=>load()).subscribe();return()=>supabase.removeChannel(ch)},[session]);
+ useEffect(()=>{if(!session)return;const ch=supabase.channel('sales-live').on('postgres_changes',{event:'*',schema:'public',table:'sales_clients'},()=>load()).on('postgres_changes',{event:'*',schema:'public',table:'sales_daily_activity'},()=>load()).on('postgres_changes',{event:'*',schema:'public',table:'sales_signup_requests'},()=>load()).subscribe();return()=>supabase.removeChannel(ch)},[session]);
 
- async function login(e){e.preventDefault();setAuthMsg('');const {error}=await supabase.auth.signInWithPassword({email,password});if(error)setAuthMsg(error.message)}
+ async function login(e){
+  e.preventDefault();setAuthMsg('');
+  const cleanEmail=email.trim().toLowerCase();
+  const {data,error}=await supabase.auth.signInWithPassword({email:cleanEmail,password});
+  if(error){setAuthMsg(error.message);return}
+  if(data?.user){
+   const p=await supabase.from('sales_user_profiles').select('*').eq('user_id',data.user.id).maybeSingle();
+   if(!p.data){
+    const r=await supabase.from('sales_signup_requests').select('*').eq('email',cleanEmail).order('created_at',{ascending:false}).limit(1).maybeSingle();
+    if(r.data?.status==='pending'){
+     await supabase.auth.signOut();
+     setAuthMsg('Seu cadastro ainda está aguardando aprovação do administrador.');
+    }else if(r.data?.status==='rejected'){
+     await supabase.auth.signOut();
+     setAuthMsg('Seu cadastro foi recusado. Fale com o administrador.');
+    }
+   }
+  }
+ }
  async function signout(){await supabase.auth.signOut()}
-  async function submitSignup(e){e.preventDefault();setSignupMsg('');const {error}=await supabase.from('sales_signup_requests').insert({name:signup.name.trim(),email:signup.email.trim().toLowerCase(),phone:signup.phone.trim(),whatsapp_number:signup.whatsapp_number.trim(),status:'pending'});if(error){setSignupMsg(error.message);return}setSignupMsg('Cadastro enviado! Aguarde a aprovação do administrador.');setSignup({name:'',email:'',phone:'',whatsapp_number:'',password:''})}
-  async function reviewSignup(id,status){const {error}=await supabase.from('sales_signup_requests').update({status,reviewed_by:session?.user?.id,reviewed_at:new Date().toISOString()}).eq('id',id);if(error){alert(error.message);return}load()}
+
+ async function submitSignup(e){
+  e.preventDefault();setSignupMsg('');
+  const cleanEmail=signup.email.trim().toLowerCase();
+  if(signup.password.length<6){setSignupMsg('A senha precisa ter pelo menos 6 caracteres.');return}
+
+  // Primeiro cria a conta real no Supabase Auth.
+  const {data:authData,error:authError}=await supabase.auth.signUp({
+   email:cleanEmail,
+   password:signup.password,
+   options:{data:{name:signup.name.trim(),phone:signup.phone.trim(),whatsapp_number:signup.whatsapp_number.trim()}}
+  });
+  if(authError){setSignupMsg(authError.message);return}
+
+  const {error}=await supabase.from('sales_signup_requests').insert({
+   name:signup.name.trim(),email:cleanEmail,phone:signup.phone.trim(),whatsapp_number:signup.whatsapp_number.trim(),status:'pending'
+  });
+  if(error){
+   // A conta do Auth continua criada; mostramos a causa para o administrador corrigir a tabela se necessário.
+   setSignupMsg('A conta foi criada, mas não foi possível enviar a solicitação: '+error.message);return;
+  }
+  if(authData.session) await supabase.auth.signOut();
+  setSignupMsg('Cadastro enviado! Aguarde a aprovação do administrador. Depois, entre com o mesmo e-mail e senha.');
+  setSignup({name:'',email:'',phone:'',whatsapp_number:'',password:''});
+ }
+
+ async function reviewSignup(request,status){
+  if(!request?.id)return;
+  setProcessingSignup(request.id);
+  try{
+   if(status==='approved'){
+    // Cria/usa o vendedor na equipe. O perfil do usuário é criado no primeiro login aprovado.
+    let member=(await supabase.from('sales_team_members').select('*').eq('active',true).eq('name',request.name).limit(1).maybeSingle()).data;
+    if(!member){
+     const ins=await supabase.from('sales_team_members').insert({name:request.name,monthly_goal:0,whatsapp_number:request.whatsapp_number||'',active:true}).select('*').maybeSingle();
+     if(ins.error){alert('Não foi possível criar o vendedor na equipe: '+ins.error.message);return}
+     member=ins.data;
+    }
+    const {error}=await supabase.from('sales_signup_requests').update({status:'approved',reviewed_by:session?.user?.id,reviewed_at:new Date().toISOString()}).eq('id',request.id);
+    if(error){alert(error.message);return}
+    alert('Vendedor aprovado! Ele já pode entrar com o e-mail e a senha cadastrados.');
+   }else{
+    const {error}=await supabase.from('sales_signup_requests').update({status:'rejected',reviewed_by:session?.user?.id,reviewed_at:new Date().toISOString()}).eq('id',request.id);
+    if(error){alert(error.message);return}
+   }
+   load();
+  }finally{setProcessingSignup(null)}
+ }
+
  async function saveClient(e){
   e.preventDefault();setSaving(true);
   const payload={...form,desired_value:form.desired_value?Number(form.desired_value):null,next_contact_at:form.next_contact_at||null};
@@ -41,33 +126,25 @@ function App(){
   if(error){alert(error.message);return}setForm({client_name:'',phone:'',seller_id:'',interest:'',desired_value:'',status:'Novo',next_contact_at:'',notes:''});setTab('clients');load();
  }
  async function saveSeller(e){
-  e.preventDefault();
-  if(!editingSeller)return;
-  const name=sellerName.trim();
-  if(!name)return;
+  e.preventDefault();if(!editingSeller)return;const name=sellerName.trim();if(!name)return;
   const {error}=await supabase.from('sales_team_members').update({name,monthly_goal:Number(sellerGoal||0),whatsapp_number:sellerWhatsapp.trim()}).eq('id',editingSeller);
-  if(error){alert(error.message);return}
-  setEditingSeller(null);setSellerName('');setSellerGoal('');setSellerWhatsapp('');load();
+  if(error){alert(error.message);return}setEditingSeller(null);setSellerName('');setSellerGoal('');setSellerWhatsapp('');load();
  }
- async function toggleSeller(id,active){
-  const {error}=await supabase.from('sales_team_members').update({active}).eq('id',id);
-  if(error){alert(error.message);return}load();
- }
-
+ async function toggleSeller(id,active){const {error}=await supabase.from('sales_team_members').update({active}).eq('id',id);if(error){alert(error.message);return}load()}
  async function saveActivity(day,field,value){
   const sellerId=profile?.role==='admin'?(reportSeller||team[0]?.id):profile?.team_member_id;if(!sellerId)return;
   const date=`${reportMonth}-${String(day).padStart(2,'0')}`,current=activities.find(a=>a.activity_date===date&&a.seller_id===sellerId);
   const payload={activity_date:date,seller_id:sellerId};['ads','calls','appointments','attendances'].forEach(k=>payload[k]=Number(current?.[k]||0));payload[field]=Math.max(0,Number(value||0));
-  if(current)await supabase.from('sales_daily_activity').update({...payload,updated_at:new Date().toISOString()}).eq('id',current.id);
-  else await supabase.from('sales_daily_activity').insert(payload);
+  if(current)await supabase.from('sales_daily_activity').update({...payload,updated_at:new Date().toISOString()}).eq('id',current.id);else await supabase.from('sales_daily_activity').insert(payload);
   const {data}=await supabase.from('sales_daily_activity').select('*').order('activity_date');setActivities(data||[]);
  }
  const stats=useMemo(()=>{const sold=clients.filter(c=>c.status==='Fechado');return{clients:clients.length,neg:clients.filter(c=>c.status==='Em negociação').length,proposals:clients.filter(c=>c.status==='Proposta').length,sales:sold.length,value:sold.reduce((a,c)=>a+Number(c.sold_value||0),0)}},[clients]);
  const ranking=useMemo(()=>team.map(t=>({...t,count:clients.filter(c=>c.seller_id===t.id).length,sales:clients.filter(c=>c.seller_id===t.id&&c.status==='Fechado').length,value:clients.filter(c=>c.seller_id===t.id).reduce((a,c)=>a+Number(c.sold_value||0),0)})).sort((a,b)=>b.value-a.value),[team,clients]);
 
  if(loading)return <div className="center">Carregando TR Representações...</div>;
- if(!session)return <div className="login"><div className="login-card"><div className="logo">TR</div><h1>TR Representações</h1>{!signupMode?<><p>Gestão comercial da sua equipe</p><form onSubmit={login}><input placeholder="E-mail" type="email" value={email} onChange={e=>setEmail(e.target.value)} required/><input placeholder="Senha" type="password" value={password} onChange={e=>setPassword(e.target.value)} required/><button>Entrar</button>{authMsg&&<small>{authMsg}</small>}</form><button className="secondary" onClick={()=>{setSignupMode(true);setAuthMsg('')}}>Criar cadastro de vendedor</button></>:<><p>Solicite seu acesso ao CRM</p><form onSubmit={submitSignup}><input placeholder="Nome completo" value={signup.name} onChange={e=>setSignup({...signup,name:e.target.value})} required/><input placeholder="E-mail" type="email" value={signup.email} onChange={e=>setSignup({...signup,email:e.target.value})} required/><input placeholder="Telefone" value={signup.phone} onChange={e=>setSignup({...signup,phone:e.target.value})}/><input placeholder="WhatsApp" value={signup.whatsapp_number} onChange={e=>setSignup({...signup,whatsapp_number:e.target.value})}/><input placeholder="Senha desejada" type="password" value={signup.password} onChange={e=>setSignup({...signup,password:e.target.value})} required/><small>A senha será definida no momento da liberação do acesso.</small><button>Enviar cadastro</button>{signupMsg&&<small>{signupMsg}</small>}</form><button className="secondary" onClick={()=>setSignupMode(false)}>Voltar para entrar</button></>}</div></div>;
- if(!profile)return <div className="center"><div><h2>Acesso ainda não configurado</h2><button onClick={signout}>Sair</button></div></div>;
+ if(!session)return <div className="login"><div className="login-card"><div className="logo">TR</div><h1>TR Representações</h1>{!signupMode?<><p>Gestão comercial da sua equipe</p><form onSubmit={login}><input placeholder="E-mail" type="email" value={email} onChange={e=>setEmail(e.target.value)} required/><input placeholder="Senha" type="password" value={password} onChange={e=>setPassword(e.target.value)} required/><button>Entrar</button>{authMsg&&<small>{authMsg}</small>}</form><button className="secondary" onClick={()=>{setSignupMode(true);setAuthMsg('')}}>Criar cadastro de vendedor</button></>:<><p>Solicite seu acesso ao CRM</p><form onSubmit={submitSignup}><input placeholder="Nome completo" value={signup.name} onChange={e=>setSignup({...signup,name:e.target.value})} required/><input placeholder="E-mail" type="email" value={signup.email} onChange={e=>setSignup({...signup,email:e.target.value})} required/><input placeholder="Telefone" value={signup.phone} onChange={e=>setSignup({...signup,phone:e.target.value})}/><input placeholder="WhatsApp" value={signup.whatsapp_number} onChange={e=>setSignup({...signup,whatsapp_number:e.target.value})}/><input placeholder="Senha" type="password" value={signup.password} onChange={e=>setSignup({...signup,password:e.target.value})} required/><small>Crie uma senha com pelo menos 6 caracteres. Ela será usada para entrar após a aprovação.</small><button>Enviar cadastro</button>{signupMsg&&<small>{signupMsg}</small>}</form><button className="secondary" onClick={()=>setSignupMode(false)}>Voltar para entrar</button></>}</div></div>;
+
+ if(!profile)return <div className="center"><div><h2>Cadastro aguardando aprovação</h2><p>Seu acesso foi criado, mas o administrador ainda precisa liberar seu cadastro.</p><button onClick={signout}>Sair</button></div></div>;
 
  return <div className="app"><aside><div className="brand"><b>TR</b><span>Representações</span></div>
  {['dashboard','clients','ranking','report','team','pending','new'].map(x=><button key={x} className={tab===x?'active':''} onClick={()=>setTab(x)}>{x==='dashboard'?'📊 Dashboard':x==='clients'?'👥 Clientes':x==='ranking'?'🏆 Ranking':x==='report'?'📅 Relatório diário':x==='team'?'👨‍💼 Equipe':x==='pending'?'🟡 Aprovações':'➕ Novo cliente'}</button>)}
@@ -76,17 +153,10 @@ function App(){
  {tab==='dashboard'&&<><section className="cards"><Card t="Clientes" v={stats.clients}/><Card t="Negociação" v={stats.neg}/><Card t="Propostas" v={stats.proposals}/><Card t="Vendas" v={stats.sales}/><Card t="Valor vendido" v={money(stats.value)}/></section><section className="panel"><h2>🏆 Ranking</h2><Table rows={ranking}/></section></>}
  {tab==='ranking'&&<section className="panel"><h2>Ranking da equipe</h2><Table rows={ranking}/></section>}
  {tab==='clients'&&<section className="panel"><div className="toolbar"><input placeholder="Buscar cliente..."/><button onClick={()=>setTab('new')}>+ Novo cliente</button></div><div className="client-list">{clients.map(c=><div className="client" key={c.id}><div><strong>{c.client_name}</strong><span>{c.phone||'Sem telefone'} · {team.find(t=>t.id===c.seller_id)?.name||'—'}</span>{team.find(t=>t.id===c.seller_id)?.whatsapp_number&&<a className="wa-client" href={`https://wa.me/${String(team.find(t=>t.id===c.seller_id).whatsapp_number).replace(/\D/g,'')}`} target="_blank" rel="noreferrer">💬 WhatsApp do vendedor</a>}</div><div><b>{c.status}</b><small>{c.next_contact_at?new Date(c.next_contact_at).toLocaleDateString('pt-BR'):''}</small></div></div>)}</div></section>}
+ {tab==='pending'&&profile.role==='admin'&&<section className="panel"><div className="team-head"><div><h2>🟡 Aprovações</h2><p>Solicitações de acesso aguardando liberação.</p></div><strong>{pendingSignups.length} pendente{pendingSignups.length===1?'':'s'}</strong></div>{pendingSignups.length===0?<div className="center"><p>Nenhum cadastro aguardando aprovação.</p></div>:<div className="team-list">{pendingSignups.map(r=><div className="team-row" key={r.id}><div className="team-avatar">{r.name.slice(0,1).toUpperCase()}</div><div className="team-info"><strong>{r.name}</strong><small>{r.email}</small><small>{r.phone||'Sem telefone'} · WhatsApp: {r.whatsapp_number||'—'}</small></div><button disabled={processingSignup===r.id} onClick={()=>reviewSignup(r,'approved')}>{processingSignup===r.id?'Processando...':'✅ Aprovar'}</button><button className="danger secondary" disabled={processingSignup===r.id} onClick={()=>reviewSignup(r,'rejected')}>❌ Recusar</button></div>)}</div>}</section>}
  {tab==='team'&&profile.role==='admin'&&<section className="panel team-panel"><div className="team-head"><div><h2>👨‍💼 Equipe</h2><p>Altere nomes, metas e ative/desative vendedores sem mexer no GitHub.</p></div></div>
  <div className="team-list">{team.map(t=><div className="team-row" key={t.id}><div className="team-avatar">{t.name.slice(0,1).toUpperCase()}</div><div className="team-info"><strong>{t.name}</strong><small>Meta: {money(t.monthly_goal)} · {t.active?'Ativo':'Inativo'}</small>{t.whatsapp_number&&<a className="wa-link" href={`https://wa.me/${String(t.whatsapp_number).replace(/\D/g,'')}`} target="_blank" rel="noreferrer">💬 {t.whatsapp_number}</a>}</div><button className="secondary" onClick={()=>{setEditingSeller(t.id);setSellerName(t.name);setSellerGoal(t.monthly_goal||0);setSellerWhatsapp(t.whatsapp_number||'')}}>✏️ Editar</button><button className={t.active?'danger secondary':'secondary'} onClick={()=>toggleSeller(t.id,!t.active)}>{t.active?'Desativar':'Ativar'}</button></div>)}</div>
  {editingSeller&&<div className="modal-backdrop"><form className="modal" onSubmit={saveSeller}><h3>Editar vendedor</h3><label>Nome<input value={sellerName} onChange={e=>setSellerName(e.target.value)} required/></label><label>Meta mensal<input type="number" value={sellerGoal} onChange={e=>setSellerGoal(e.target.value)} min="0"/></label><label>WhatsApp do vendedor<input placeholder="5515999999999" value={sellerWhatsapp} onChange={e=>setSellerWhatsapp(e.target.value)}/><small className="hint">Use DDI + DDD + número. Ex.: 5515999999999</small></label><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setEditingSeller(null)}>Cancelar</button><button>Salvar alterações</button></div></form></div>}
- </section>}
- {tab==='pending'&&profile.role==='admin'&&<section className="panel pending-panel">
-  <div className="team-head"><div><h2>🟡 Solicitações de vendedores</h2><p>Cadastros aguardando sua aprovação.</p></div></div>
-  {pendingSignups.length===0?<div className="empty-state">Nenhuma solicitação pendente no momento.</div>:<div className="team-list">{pendingSignups.map(s=><div className="team-row" key={s.id}>
-   <div className="team-avatar">{(s.name||'V').slice(0,1).toUpperCase()}</div>
-   <div className="team-info"><strong>{s.name}</strong><small>E-mail: {s.email||'—'} · Telefone: {s.phone||'—'}</small><small>WhatsApp: {s.whatsapp_number||'—'}</small><small>Solicitado em: {s.created_at?new Date(s.created_at).toLocaleString('pt-BR'):'—'}</small></div>
-   <button onClick={()=>reviewSignup(s.id,'approved')}>✅ Aprovar</button><button className="danger secondary" onClick={()=>reviewSignup(s.id,'rejected')}>❌ Recusar</button>
-  </div>)}</div>}
  </section>}
  {tab==='report'&&<DailyReport team={team} activities={activities} month={reportMonth} setMonth={setReportMonth} seller={reportSeller} setSeller={setReportSeller} profile={profile} onSave={saveActivity}/>}
  {tab==='new'&&<section className="panel form"><form onSubmit={saveClient}><div className="grid"><label>Cliente<input value={form.client_name} onChange={e=>setForm({...form,client_name:e.target.value})} required/></label><label>Telefone<input value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></label><label>Vendedor<select value={form.seller_id} onChange={e=>setForm({...form,seller_id:e.target.value})} required><option value="">Selecione</option>{team.map(t=><option value={t.id} key={t.id}>{t.name}</option>)}</select></label><label>Interesse<input value={form.interest} onChange={e=>setForm({...form,interest:e.target.value})}/></label><label>Valor desejado<input type="number" value={form.desired_value} onChange={e=>setForm({...form,desired_value:e.target.value})}/></label><label>Status<select value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>{statuses.map(s=><option key={s}>{s}</option>)}</select></label><label>Próximo contato<input type="datetime-local" value={form.next_contact_at} onChange={e=>setForm({...form,next_contact_at:e.target.value})}/></label><label>Observações<textarea value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></label></div><button disabled={saving}>{saving?'Salvando...':'Salvar cliente'}</button></form></section>}
