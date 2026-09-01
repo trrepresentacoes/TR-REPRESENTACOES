@@ -13,6 +13,8 @@ function App(){
  const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[authMsg,setAuthMsg]=useState(''),[saving,setSaving]=useState(false);
  const [reportMonth,setReportMonth]=useState(new Date().toISOString().slice(0,7)),[reportSeller,setReportSeller]=useState('');
  const [editingSeller,setEditingSeller]=useState(null),[sellerName,setSellerName]=useState(''),[sellerGoal,setSellerGoal]=useState(''),[sellerWhatsapp,setSellerWhatsapp]=useState('');
+  const [signupMode,setSignupMode]=useState(false),[signup,setSignup]=useState({name:'',email:'',phone:'',whatsapp_number:'',password:''}),[signupMsg,setSignupMsg]=useState('');
+  const [pendingSignups,setPendingSignups]=useState([]);
  const [form,setForm]=useState({client_name:'',phone:'',seller_id:'',interest:'',desired_value:'',status:'Novo',next_contact_at:'',notes:''});
 
  async function load(){
@@ -22,6 +24,7 @@ function App(){
   const t=await supabase.from('sales_team_members').select('*').eq('active',true).order('name');setTeam(t.data||[]);
   const c=await supabase.from('sales_clients').select('*').order('created_at',{ascending:false});setClients(c.data||[]);
   const a=await supabase.from('sales_daily_activity').select('*').order('activity_date');setActivities(a.data||[]);
+   if(p.data?.role==='admin'){const s=await supabase.from('sales_signup_requests').select('*').eq('status','pending').order('created_at',{ascending:false});setPendingSignups(s.data||[]);}
   setLoading(false);
  }
  useEffect(()=>{load();const {data}=supabase.auth.onAuthStateChange(()=>load());return()=>data.subscription.unsubscribe()},[]);
@@ -29,6 +32,8 @@ function App(){
 
  async function login(e){e.preventDefault();setAuthMsg('');const {error}=await supabase.auth.signInWithPassword({email,password});if(error)setAuthMsg(error.message)}
  async function signout(){await supabase.auth.signOut()}
+  async function submitSignup(e){e.preventDefault();setSignupMsg('');const {error}=await supabase.from('sales_signup_requests').insert({name:signup.name.trim(),email:signup.email.trim().toLowerCase(),phone:signup.phone.trim(),whatsapp_number:signup.whatsapp_number.trim(),status:'pending'});if(error){setSignupMsg(error.message);return}setSignupMsg('Cadastro enviado! Aguarde a aprovação do administrador.');setSignup({name:'',email:'',phone:'',whatsapp_number:'',password:''})}
+  async function reviewSignup(id,status){const {error}=await supabase.from('sales_signup_requests').update({status,reviewed_by:session?.user?.id,reviewed_at:new Date().toISOString()}).eq('id',id);if(error){alert(error.message);return}load()}
  async function saveClient(e){
   e.preventDefault();setSaving(true);
   const payload={...form,desired_value:form.desired_value?Number(form.desired_value):null,next_contact_at:form.next_contact_at||null};
@@ -61,13 +66,13 @@ function App(){
  const ranking=useMemo(()=>team.map(t=>({...t,count:clients.filter(c=>c.seller_id===t.id).length,sales:clients.filter(c=>c.seller_id===t.id&&c.status==='Fechado').length,value:clients.filter(c=>c.seller_id===t.id).reduce((a,c)=>a+Number(c.sold_value||0),0)})).sort((a,b)=>b.value-a.value),[team,clients]);
 
  if(loading)return <div className="center">Carregando TR Representações...</div>;
- if(!session)return <div className="login"><div className="login-card"><div className="logo">TR</div><h1>TR Representações</h1><p>Gestão comercial da sua equipe</p><form onSubmit={login}><input placeholder="E-mail" type="email" value={email} onChange={e=>setEmail(e.target.value)} required/><input placeholder="Senha" type="password" value={password} onChange={e=>setPassword(e.target.value)} required/><button>Entrar</button>{authMsg&&<small>{authMsg}</small>}</form></div></div>;
+ if(!session)return <div className="login"><div className="login-card"><div className="logo">TR</div><h1>TR Representações</h1>{!signupMode?<><p>Gestão comercial da sua equipe</p><form onSubmit={login}><input placeholder="E-mail" type="email" value={email} onChange={e=>setEmail(e.target.value)} required/><input placeholder="Senha" type="password" value={password} onChange={e=>setPassword(e.target.value)} required/><button>Entrar</button>{authMsg&&<small>{authMsg}</small>}</form><button className="secondary" onClick={()=>{setSignupMode(true);setAuthMsg('')}}>Criar cadastro de vendedor</button></>:<><p>Solicite seu acesso ao CRM</p><form onSubmit={submitSignup}><input placeholder="Nome completo" value={signup.name} onChange={e=>setSignup({...signup,name:e.target.value})} required/><input placeholder="E-mail" type="email" value={signup.email} onChange={e=>setSignup({...signup,email:e.target.value})} required/><input placeholder="Telefone" value={signup.phone} onChange={e=>setSignup({...signup,phone:e.target.value})}/><input placeholder="WhatsApp" value={signup.whatsapp_number} onChange={e=>setSignup({...signup,whatsapp_number:e.target.value})}/><input placeholder="Senha desejada" type="password" value={signup.password} onChange={e=>setSignup({...signup,password:e.target.value})} required/><small>A senha será definida no momento da liberação do acesso.</small><button>Enviar cadastro</button>{signupMsg&&<small>{signupMsg}</small>}</form><button className="secondary" onClick={()=>setSignupMode(false)}>Voltar para entrar</button></>}</div></div>;
  if(!profile)return <div className="center"><div><h2>Acesso ainda não configurado</h2><button onClick={signout}>Sair</button></div></div>;
 
  return <div className="app"><aside><div className="brand"><b>TR</b><span>Representações</span></div>
- {['dashboard','clients','ranking','report','team','new'].map(x=><button key={x} className={tab===x?'active':''} onClick={()=>setTab(x)}>{x==='dashboard'?'📊 Dashboard':x==='clients'?'👥 Clientes':x==='ranking'?'🏆 Ranking':x==='report'?'📅 Relatório diário':x==='team'?'👨‍💼 Equipe':'➕ Novo cliente'}</button>)}
+ {['dashboard','clients','ranking','report','team','pending','new'].map(x=><button key={x} className={tab===x?'active':''} onClick={()=>setTab(x)}>{x==='dashboard'?'📊 Dashboard':x==='clients'?'👥 Clientes':x==='ranking'?'🏆 Ranking':x==='report'?'📅 Relatório diário':x==='team'?'👨‍💼 Equipe':x==='pending'?'🟡 Aprovações':'➕ Novo cliente'}</button>)}
  <div className="user"><strong>{profile.role==='admin'?'Administrador':(team.find(t=>t.id===profile.team_member_id)?.name||'Vendedor')}</strong><button onClick={signout}>Sair</button></div></aside>
- <main><header><div><h1>{tab==='dashboard'?'Dashboard':tab==='clients'?'Clientes':tab==='ranking'?'Ranking':tab==='report'?'Relatório diário':tab==='team'?'Equipe':'Novo cliente'}</h1><span>Atualização em tempo real</span></div></header>
+ <main><header><div><h1>{tab==='dashboard'?'Dashboard':tab==='clients'?'Clientes':tab==='ranking'?'Ranking':tab==='report'?'Relatório diário':tab==='team'?'Equipe':tab==='pending'?'Aprovações':'Novo cliente'}</h1><span>Atualização em tempo real</span></div></header>
  {tab==='dashboard'&&<><section className="cards"><Card t="Clientes" v={stats.clients}/><Card t="Negociação" v={stats.neg}/><Card t="Propostas" v={stats.proposals}/><Card t="Vendas" v={stats.sales}/><Card t="Valor vendido" v={money(stats.value)}/></section><section className="panel"><h2>🏆 Ranking</h2><Table rows={ranking}/></section></>}
  {tab==='ranking'&&<section className="panel"><h2>Ranking da equipe</h2><Table rows={ranking}/></section>}
  {tab==='clients'&&<section className="panel"><div className="toolbar"><input placeholder="Buscar cliente..."/><button onClick={()=>setTab('new')}>+ Novo cliente</button></div><div className="client-list">{clients.map(c=><div className="client" key={c.id}><div><strong>{c.client_name}</strong><span>{c.phone||'Sem telefone'} · {team.find(t=>t.id===c.seller_id)?.name||'—'}</span>{team.find(t=>t.id===c.seller_id)?.whatsapp_number&&<a className="wa-client" href={`https://wa.me/${String(team.find(t=>t.id===c.seller_id).whatsapp_number).replace(/\D/g,'')}`} target="_blank" rel="noreferrer">💬 WhatsApp do vendedor</a>}</div><div><b>{c.status}</b><small>{c.next_contact_at?new Date(c.next_contact_at).toLocaleDateString('pt-BR'):''}</small></div></div>)}</div></section>}
